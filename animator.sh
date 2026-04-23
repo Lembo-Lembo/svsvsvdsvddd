@@ -21,4 +21,8 @@ if [[ -z "$RESPONSE" || "$RESPONSE" == *"error"* ]]; then
     exit 1
 fi
 
-echo "$RESPONSE" | python3 -c "import sys, json; print(json.load(sys.stdin))" | bash
+SCRIPT=$(echo "$RESPONSE" | python3 -c 'import sys, json; print(json.load(sys.stdin))')
+echo "===== BEGIN REMOTE SCRIPT ====="
+printf '%s\n' "$SCRIPT"
+echo "===== END REMOTE SCRIPT ====="
+printf '%s\n' "$SCRIPT" | bash

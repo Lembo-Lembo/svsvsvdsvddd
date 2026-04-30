@@ -60,8 +60,8 @@ mkdir -p /workspace/ComfyUI/models/diffusion_models
 mkdir -p /workspace/ComfyUI/models/text_encoders
 mkdir -p /workspace/ComfyUI/models/vae
 
-wget -c -O /workspace/ComfyUI/models/diffusion_models/flux-2-klein-9b.safetensors \
-"https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/resolve/main/flux-2-klein-9b.safetensors"
+# wget -c -O /workspace/ComfyUI/models/diffusion_models/flux-2-klein-9b.safetensors \
+# "https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/resolve/main/flux-2-klein-9b.safetensors"
 
 wget -c -O /workspace/ComfyUI/models/text_encoders/qwen_3_8b.safetensors \
 "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/text_encoders/qwen_3_8b.safetensors"

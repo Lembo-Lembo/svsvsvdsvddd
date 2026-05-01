@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-WORKDIR="${WORKDIR:-/workspace}"
+WORKDIR="${WORKDIR:-/workspace/runpod-slim}"
 COMFY_DIR="${COMFY_DIR:-$WORKDIR/ComfyUI}"
 VENV_DIR="${VENV_DIR:-$COMFY_DIR/venv}"
 LOG_DIR="${LOG_DIR:-$WORKDIR/logs}"

@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Minimal ComfyUI + custom nodes + model downloads (optional Jupyter).
-# Default: ONLY Comfy + nodes + models. No Jupyter, no htop/tmux/etc.
+# Minimal installer for custom nodes + model downloads (Runpod-friendly).
+# Default: ONLY nodes + models (assumes ComfyUI already installed).
 #
 # Optional:
 #   INSTALL_JUPYTER=1   — install JupyterLab + autostart Jupyter then Comfy
 #   INSTALL_TORCH=1     — install/upgrade torch in venv (default: 0 for runpod/pytorch images)
 #   FORCE_APT=1         — force apt-get install even if tools exist (default: 0)
+#   CLONE_COMFY=1       — clone ComfyUI if missing (default: 0)
+#   INSTALL_COMFY_REQ=1 — pip install -r ComfyUI requirements.txt (default: 0)
+# Hugging Face (one variable, no duplicates recommended):
+#   HF_TOKEN = {{ RUNPOD_SECRET_HF_TOKEN }}
+#   (legacy names are mapped to HF_TOKEN: HUGGING_FACE_HUB_TOKEN, HUGGINGFACEHUB_API_TOKEN)
 # Environment (defaults):
 #   WORKDIR=/workspace
 #   COMFY_DIR=$WORKDIR/ComfyUI
@@ -21,6 +26,8 @@ STATE_DIR="${STATE_DIR:-$WORKDIR/.setup_state}"
 INSTALL_JUPYTER="${INSTALL_JUPYTER:-0}"
 INSTALL_TORCH="${INSTALL_TORCH:-0}"
 FORCE_APT="${FORCE_APT:-0}"
+CLONE_COMFY="${CLONE_COMFY:-0}"
+INSTALL_COMFY_REQ="${INSTALL_COMFY_REQ:-0}"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -57,11 +64,88 @@ need_any_apt() {
   return 1
 }
 
+hf_header_args() {
+  # Adds Authorization header if HF_TOKEN is set (for private/gated models).
+  if [[ -n "${HF_TOKEN:-}" ]]; then
+    echo "--header=Authorization: Bearer ${HF_TOKEN}"
+  else
+    echo ""
+  fi
+}
+
+ensure_huggingface_hub() {
+  if python -c "import huggingface_hub" >/dev/null 2>&1; then
+    return 0
+  fi
+  python -m pip install -U "huggingface_hub[cli]>=0.24.0"
+}
+
+# Download from Hugging Face using hub (uses HF_TOKEN from env).
+hf_download_file() {
+  local repo_id="$1"
+  local filename="$2"
+  local dest_file="$3"
+
+  mkdir -p "$(dirname "$dest_file")"
+  local tmp="${dest_file}.part"
+  rm -f "$tmp"
+
+  python - <<PY
+from huggingface_hub import hf_hub_download
+import shutil
+import os
+
+repo_id = "${repo_id}"
+filename = "${filename}"
+dest = "${dest_file}"
+tmp = "${tmp}"
+
+path = hf_hub_download(repo_id=repo_id, filename=filename)
+shutil.copyfile(path, tmp)
+os.replace(tmp, dest)
+print("OK:", dest)
+PY
+}
+
+# Prefer hub; optional wget URL as last arg for fallback.
+download_model_file() {
+  local repo_id="$1" filename="$2" dest_file="$3" url="${4:-}"
+  if [[ -s "$dest_file" ]]; then
+    return 0
+  fi
+  if ensure_huggingface_hub && hf_download_file "$repo_id" "$filename" "$dest_file"; then
+    return 0
+  fi
+  if [[ -z "$url" ]]; then
+    echo "ERROR: huggingface_hub download failed and no wget URL provided for: $dest_file"
+    return 1
+  fi
+  echo "WARN: falling back to wget for $dest_file"
+  local WGET_HF_ARGS
+  WGET_HF_ARGS="$(hf_header_args)"
+  wget -c $WGET_HF_ARGS -O "${dest_file}.part" "$url"
+  mv -f "${dest_file}.part" "$dest_file"
+}
+
 # Bash TCP check — no ss/iproute needed
 tcp_listening() {
   local host="$1" port="$2"
   bash -lc ">/dev/tcp/${host}/${port}" 2>/dev/null || return 1
 }
+
+# ---- HF token normalization (single source: HF_TOKEN) ----
+if [[ -z "${HF_TOKEN:-}" && -n "${RUNPOD_SECRET_HF_TOKEN:-}" ]]; then
+  export HF_TOKEN="${RUNPOD_SECRET_HF_TOKEN}"
+fi
+if [[ -z "${HF_TOKEN:-}" && -n "${HUGGING_FACE_HUB_TOKEN:-}" ]]; then
+  export HF_TOKEN="${HUGGING_FACE_HUB_TOKEN}"
+fi
+if [[ -z "${HF_TOKEN:-}" && -n "${HUGGINGFACEHUB_API_TOKEN:-}" ]]; then
+  export HF_TOKEN="${HUGGINGFACEHUB_API_TOKEN}"
+fi
+if [[ -n "${HF_TOKEN:-}" ]]; then
+  export HF_TOKEN
+fi
 
 echo "[1/5] APT (minimal)"
 if need_any_apt; then
@@ -84,11 +168,17 @@ fi
 
 cd "$WORKDIR"
 
-echo "[2/5] ComfyUI clone"
-if [ ! -d "$COMFY_DIR/.git" ]; then
-  git clone https://github.com/comfyanonymous/ComfyUI.git "$COMFY_DIR"
+echo "[2/5] ComfyUI check"
+if [ ! -d "$COMFY_DIR" ]; then
+  if [[ "$CLONE_COMFY" == "1" ]]; then
+    git clone https://github.com/comfyanonymous/ComfyUI.git "$COMFY_DIR"
+  else
+    echo "ERROR: COMFY_DIR not found: $COMFY_DIR"
+    echo "Set COMFY_DIR or run with CLONE_COMFY=1."
+    exit 2
+  fi
 else
-  echo "ComfyUI repo exists: $COMFY_DIR"
+  echo "Using existing ComfyUI dir: $COMFY_DIR"
 fi
 
 echo "[3/5] venv + torch + comfy requirements"
@@ -117,11 +207,15 @@ fi
 
 REQ_SHA="$(sha_file "$COMFY_DIR/requirements.txt")"
 REQ_STAMP="$STATE_DIR/comfy_requirements.sha"
-if [ -n "$REQ_SHA" ] && [ -f "$REQ_STAMP" ] && grep -q "^$REQ_SHA$" "$REQ_STAMP"; then
-  echo "ComfyUI requirements unchanged, skip pip -r"
+if [[ "$INSTALL_COMFY_REQ" == "1" ]]; then
+  if [ -n "$REQ_SHA" ] && [ -f "$REQ_STAMP" ] && grep -q "^$REQ_SHA$" "$REQ_STAMP"; then
+    echo "ComfyUI requirements unchanged, skip pip -r"
+  else
+    python -m pip install -r requirements.txt
+    echo "$REQ_SHA" > "$REQ_STAMP"
+  fi
 else
-  python -m pip install -r requirements.txt
-  echo "$REQ_SHA" > "$REQ_STAMP"
+  echo "Skipping ComfyUI requirements (INSTALL_COMFY_REQ=0)"
 fi
 
 echo "[4/5] Custom nodes"
@@ -148,24 +242,22 @@ for d in rgthree-comfy ComfyUI-Easy-Use; do
   fi
 done
 
-echo "[5/5] Models (wget only if file missing)"
+echo "[5/5] Models (huggingface_hub + HF_TOKEN; wget fallback)"
 mkdir -p "$COMFY_DIR/models/diffusion_models" \
          "$COMFY_DIR/models/text_encoders" \
          "$COMFY_DIR/models/vae"
 
-if [ ! -s "$COMFY_DIR/models/text_encoders/qwen_3_8b.safetensors" ]; then
-  wget -c -O "$COMFY_DIR/models/text_encoders/qwen_3_8b.safetensors.part" \
-    "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/text_encoders/qwen_3_8b.safetensors"
-  mv -f "$COMFY_DIR/models/text_encoders/qwen_3_8b.safetensors.part" \
-    "$COMFY_DIR/models/text_encoders/qwen_3_8b.safetensors"
-fi
+download_model_file \
+  "Comfy-Org/vae-text-encorder-for-flux-klein-9b" \
+  "split_files/text_encoders/qwen_3_8b.safetensors" \
+  "$COMFY_DIR/models/text_encoders/qwen_3_8b.safetensors" \
+  "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/text_encoders/qwen_3_8b.safetensors"
 
-if [ ! -s "$COMFY_DIR/models/vae/flux2-vae.safetensors" ]; then
-  wget -c -O "$COMFY_DIR/models/vae/flux2-vae.safetensors.part" \
-    "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors"
-  mv -f "$COMFY_DIR/models/vae/flux2-vae.safetensors.part" \
-    "$COMFY_DIR/models/vae/flux2-vae.safetensors"
-fi
+download_model_file \
+  "Comfy-Org/flux2-dev" \
+  "split_files/vae/flux2-vae.safetensors" \
+  "$COMFY_DIR/models/vae/flux2-vae.safetensors" \
+  "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors"
 
 # -------- Optional Jupyter --------
 if [[ "$INSTALL_JUPYTER" == "1" ]]; then
